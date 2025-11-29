@@ -1,0 +1,1521 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>Smart Kakeibo</title>
+
+  <!-- PWA Settings -->
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <link rel="apple-touch-icon" href="https://cdn-icons-png.flaticon.com/512/2382/2382461.png">
+
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            brand: {
+              50: '#f0fdf4',
+              100: '#dcfce7',
+              500: '#22c55e',
+              600: '#16a34a',
+              700: '#15803d',
+              900: '#14532d',
+            }
+          },
+          fontFamily: {
+            sans: ['"Helvetica Neue"', 'Arial', '"Hiragino Kaku Gothic ProN"', '"Hiragino Sans"', 'Meiryo', 'sans-serif']
+          },
+          padding: {
+            'safe': 'env(safe-area-inset-bottom)'
+          },
+          animation: {
+            'fade-in': 'fadeIn 0.2s ease-out',
+            'fade-in-up': 'fadeInUp 0.3s ease-out',
+            'pop-in': 'popIn 0.2s cubic-bezier(0.16, 1, 0.3, 1)',
+          },
+          keyframes: {
+            fadeIn: {
+              '0%': { opacity: '0' },
+              '100%': { opacity: '1' },
+            },
+            fadeInUp: {
+              '0%': { opacity: '0', transform: 'translateY(10px)' },
+              '100%': { opacity: '1', transform: 'translateY(0)' },
+            },
+            popIn: {
+              '0%': { opacity: '0', transform: 'scale(0.95)' },
+              '100%': { opacity: '1', transform: 'scale(1)' },
+            }
+          }
+        }
+      }
+    }
+  </script>
+  <style>
+    /* Hide scrollbar for clean UI */
+    .no-scrollbar::-webkit-scrollbar {
+      display: none;
+    }
+    .no-scrollbar {
+      -ms-overflow-style: none;
+      scrollbar-width: none;
+    }
+  </style>
+
+  <!-- React & ReactDOM & Babel -->
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+</head>
+<body class="bg-gray-50 text-gray-900 font-sans antialiased overflow-hidden fixed inset-0">
+  <div id="root" class="h-full w-full"></div>
+
+  <!-- Application Logic -->
+  <script type="text/babel">
+    const { useState, useEffect, useMemo, useRef } = React;
+
+    /* --- constants.ts --- */
+    const INITIAL_PAYMENT_METHODS = [
+      { id: 'pm_cash', name: '現金', type: 'CASH' },
+      { id: 'pm_rakuten_card', name: '楽天カード', type: 'CREDIT' },
+      { id: 'pm_paypay', name: 'PayPay', type: 'CASH' },
+      { id: 'pm_rakuten_pay', name: '楽天ペイ', type: 'CASH' },
+      { id: 'pm_mercard', name: 'メルカード', type: 'CREDIT' },
+      { id: 'pm_bank', name: '銀行引落', type: 'CASH' },
+    ];
+
+    const INITIAL_CATEGORIES = [
+      // Income
+      { id: 'cat_salary', name: '給与', type: 'INCOME' },
+      { id: 'cat_bonus', name: '賞与', type: 'INCOME' },
+      { id: 'cat_temp', name: '臨時収入', type: 'INCOME' },
+      // Expenses - Fixed
+      { id: 'cat_rent', name: '家賃', type: 'EXPENSE', isFixed: true },
+      { id: 'cat_utility', name: '光熱費', type: 'EXPENSE', isFixed: true },
+      { id: 'cat_internet', name: '通信費', type: 'EXPENSE', isFixed: true },
+      { id: 'cat_sub', name: 'サブスク', type: 'EXPENSE', isFixed: true },
+      // Expenses - Variable
+      { id: 'cat_food', name: '食費', type: 'EXPENSE', isFixed: false },
+      { id: 'cat_daily', name: '日用品', type: 'EXPENSE', isFixed: false },
+      { id: 'cat_transport', name: '交通費', type: 'EXPENSE', isFixed: false },
+      { id: 'cat_ent', name: '娯楽・交際', type: 'EXPENSE', isFixed: false },
+      { id: 'cat_beauty', name: '衣服・美容', type: 'EXPENSE', isFixed: false },
+      { id: 'cat_med', name: '医療費', type: 'EXPENSE', isFixed: false },
+      { id: 'cat_other', name: 'その他', type: 'EXPENSE', isFixed: false },
+    ];
+
+    /* --- services/storageService.ts (Safe Version) --- */
+    const KEYS = {
+      TRANSACTIONS: 'sk_transactions_v1',
+      PAYMENT_METHODS: 'sk_payment_methods_v1',
+      CATEGORIES: 'sk_categories_v1',
+      FIXED_CONFIGS: 'sk_fixed_configs_v1',
+    };
+
+    const safeGet = (key, defaultVal) => {
+      try {
+        const data = localStorage.getItem(key);
+        return data ? JSON.parse(data) : defaultVal;
+      } catch (e) {
+        console.warn('Storage access denied or error:', e);
+        return defaultVal;
+      }
+    };
+
+    const safeSet = (key, val) => {
+      try {
+        localStorage.setItem(key, JSON.stringify(val));
+      } catch (e) {
+        console.warn('Storage save failed:', e);
+      }
+    };
+
+    const getTransactions = () => safeGet(KEYS.TRANSACTIONS, []);
+    const saveTransactions = (val) => safeSet(KEYS.TRANSACTIONS, val);
+
+    const getPaymentMethods = () => safeGet(KEYS.PAYMENT_METHODS, INITIAL_PAYMENT_METHODS);
+    const savePaymentMethods = (val) => safeSet(KEYS.PAYMENT_METHODS, val);
+
+    const getCategories = () => safeGet(KEYS.CATEGORIES, INITIAL_CATEGORIES);
+    const saveCategories = (val) => safeSet(KEYS.CATEGORIES, val);
+
+    const getFixedConfigs = () => safeGet(KEYS.FIXED_CONFIGS, []);
+    const saveFixedConfigs = (val) => safeSet(KEYS.FIXED_CONFIGS, val);
+
+
+    /* --- components/Icons.tsx --- */
+    const IconTrash = ({ className = "", size = 20, ...props }) => (
+      <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className} {...props}>
+        <path d="M3 6h18" /><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6" /><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2" />
+      </svg>
+    );
+
+    const IconChart = ({ className = "", size = 24, ...props }) => (
+      <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className} {...props}>
+        <line x1="12" y1="20" x2="12" y2="10" /><line x1="18" y1="20" x2="18" y2="4" /><line x1="6" y1="20" x2="6" y2="16" />
+      </svg>
+    );
+
+    const IconPen = ({ className = "", size = 24, ...props }) => (
+      <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className} {...props}>
+        <path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z" />
+      </svg>
+    );
+
+    const IconCalendar = ({ className = "", size = 24, ...props }) => (
+      <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className} {...props}>
+        <rect x="3" y="4" width="18" height="18" rx="2" ry="2" /><line x1="16" y1="2" x2="16" y2="6" /><line x1="8" y1="2" x2="8" y2="6" /><line x1="3" y1="10" x2="21" y2="10" />
+      </svg>
+    );
+
+    const IconSettings = ({ className = "", size = 24, ...props }) => (
+      <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className} {...props}>
+        <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.09a2 2 0 0 1-1-1.74v-.47a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.39a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" /><circle cx="12" cy="12" r="3" />
+      </svg>
+    );
+
+    const IconCash = ({ className = "", size = 20, ...props }) => (
+      <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className} {...props}>
+        <rect x="2" y="6" width="20" height="12" rx="2" /><circle cx="12" cy="12" r="2" /><path d="M6 12h.01M18 12h.01" />
+      </svg>
+    );
+
+    const IconCard = ({ className = "", size = 20, ...props }) => (
+      <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className} {...props}>
+        <rect x="1" y="4" width="22" height="16" rx="2" ry="2" /><line x1="1" y1="10" x2="23" y2="10" />
+      </svg>
+    );
+
+    const IconArrowLeft = ({ className = "", size = 16, ...props }) => (
+      <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className} {...props}>
+        <path d="M15 18l-6-6 6-6" />
+      </svg>
+    );
+
+    const IconArrowRight = ({ className = "", size = 16, ...props }) => (
+      <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className} {...props}>
+        <path d="M9 18l6-6-6-6" />
+      </svg>
+    );
+
+    const IconCheck = ({ className = "", size = 20, ...props }) => (
+      <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className} {...props}>
+        <polyline points="20 6 9 17 4 12" />
+      </svg>
+    );
+
+    const IconPlus = ({ className = "", size = 20, ...props }) => (
+      <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className} {...props}>
+        <line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
+      </svg>
+    );
+
+    const IconDownload = ({ className = "", size = 24, ...props }) => (
+      <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className} {...props}>
+        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+        <polyline points="7 10 12 15 17 10" />
+        <line x1="12" y1="15" x2="12" y2="3" />
+      </svg>
+    );
+
+    const IconUpload = ({ className = "", size = 24, ...props }) => (
+      <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className} {...props}>
+        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+        <polyline points="17 8 12 3 7 8" />
+        <line x1="12" y1="3" x2="12" y2="15" />
+      </svg>
+    );
+
+    /* --- components/ConfirmModal.tsx --- */
+    const ConfirmModal = ({ isOpen, message, onConfirm, onCancel }) => {
+      if (!isOpen) return null;
+
+      return (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-fade-in" onClick={onCancel}>
+          <div 
+            className="bg-white rounded-3xl p-6 w-full max-w-sm shadow-2xl animate-pop-in overflow-hidden" 
+            onClick={e => e.stopPropagation()}
+          >
+            <div className="flex flex-col items-center text-center mb-6">
+              <div className="w-12 h-12 bg-red-100 rounded-full flex items-center justify-center text-red-500 mb-4">
+                <IconTrash size={24} />
+              </div>
+              <h3 className="text-lg font-black text-gray-800 mb-2">削除の確認</h3>
+              <p className="text-sm text-gray-600 font-medium leading-relaxed whitespace-pre-line">
+                {message}
+              </p>
+            </div>
+            <div className="flex gap-3">
+              <button
+                type="button"
+                onClick={onCancel}
+                className="flex-1 py-3.5 rounded-2xl border-2 border-gray-100 font-bold text-gray-600 hover:bg-gray-50 active:scale-95 transition-all"
+              >
+                キャンセル
+              </button>
+              <button
+                type="button"
+                onClick={onConfirm}
+                className="flex-1 py-3.5 rounded-2xl bg-red-500 text-white font-bold shadow-lg shadow-red-200 hover:bg-red-600 active:scale-95 transition-all"
+              >
+                削除する
+              </button>
+            </div>
+          </div>
+        </div>
+      );
+    };
+
+    /* --- components/TransactionForm.tsx --- */
+    const generateId = () => `t_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
+
+    const TransactionForm = ({ categories, paymentMethods, onSave, onCancel }) => {
+      const [type, setType] = useState('EXPENSE');
+      const [amount, setAmount] = useState('');
+      const [date, setDate] = useState(new Date().toISOString().slice(0, 10));
+      const [categoryId, setCategoryId] = useState('');
+      const [item, setItem] = useState('');
+      const [paymentMethodId, setPaymentMethodId] = useState('');
+      const [memo, setMemo] = useState('');
+      const [isNecessary, setIsNecessary] = useState(true);
+
+      const filteredCategories = categories.filter(c => c.type === type);
+
+      const handleSubmit = (e) => {
+        if (e) e.preventDefault();
+        
+        if (!amount || !categoryId || !date) {
+            alert("「日付」「金額」「カテゴリ」は必須項目です。");
+            return;
+        }
+        if (type === 'EXPENSE' && !paymentMethodId) {
+            alert("「支払い方法」を選択してください。\n(支払い方法がない場合は設定から追加してください)");
+            return;
+        }
+
+        const newTransaction = {
+          id: generateId(),
+          date,
+          type,
+          amount: parseInt(amount, 10),
+          categoryId,
+          paymentMethodId: type === 'EXPENSE' ? paymentMethodId : '',
+          memo,
+          item,
+          isNecessary: type === 'EXPENSE' ? isNecessary : undefined
+        };
+
+        onSave(newTransaction);
+        
+        // Reset inputs
+        setAmount('');
+        setMemo('');
+        setItem('');
+      };
+
+      return (
+        <div className="bg-white p-5 md:p-8 rounded-3xl shadow-lg border border-gray-100 max-w-lg mx-auto mt-4">
+          <h2 className="text-xl font-black mb-6 text-gray-800 flex items-center gap-2 tracking-tight">
+            <IconPlus className="text-brand-600 pointer-events-none" /> 入力
+          </h2>
+          
+          <div className="flex mb-8 bg-gray-100 p-1.5 rounded-2xl">
+            <button
+              type="button"
+              onClick={() => { setType('EXPENSE'); setCategoryId(''); }}
+              className={`flex-1 py-3 rounded-xl text-sm font-bold transition-all duration-200 ${
+                type === 'EXPENSE' ? 'bg-white text-red-500 shadow-md transform scale-[1.02]' : 'text-gray-500 hover:text-gray-700'
+              }`}
+            >
+              支出
+            </button>
+            <button
+              type="button"
+              onClick={() => { setType('INCOME'); setCategoryId(''); }}
+              className={`flex-1 py-3 rounded-xl text-sm font-bold transition-all duration-200 ${
+                type === 'INCOME' ? 'bg-white text-green-600 shadow-md transform scale-[1.02]' : 'text-gray-500 hover:text-gray-700'
+              }`}
+            >
+              収入
+            </button>
+          </div>
+
+          <form onSubmit={handleSubmit} className="space-y-6">
+            <div>
+              <label className="block text-xs font-bold text-gray-500 mb-2 uppercase tracking-wide ml-1">日付</label>
+              <input
+                type="date"
+                value={date}
+                onChange={(e) => setDate(e.target.value)}
+                className="w-full rounded-2xl border-gray-200 border-2 p-3.5 focus:ring-4 focus:ring-brand-100 focus:border-brand-500 bg-gray-50/50 font-bold text-gray-800 outline-none transition-all"
+                required
+              />
+            </div>
+
+            <div>
+              <label className="block text-xs font-bold text-gray-500 mb-2 uppercase tracking-wide ml-1">金額</label>
+              <div className="relative">
+                <span className="absolute left-4 top-4 text-gray-400 font-bold text-lg">¥</span>
+                <input
+                  type="number"
+                  value={amount}
+                  onChange={(e) => setAmount(e.target.value)}
+                  placeholder="0"
+                  className="w-full rounded-2xl border-gray-200 border-2 p-3.5 pl-10 text-2xl font-black text-gray-800 focus:ring-4 focus:ring-brand-100 focus:border-brand-500 outline-none transition-all"
+                  required
+                  min="1"
+                  inputMode="numeric"
+                />
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="block text-xs font-bold text-gray-500 mb-2 uppercase tracking-wide ml-1">カテゴリ</label>
+                <div className="relative">
+                    <select
+                    value={categoryId}
+                    onChange={(e) => setCategoryId(e.target.value)}
+                    className="w-full rounded-2xl border-gray-200 border-2 p-3.5 appearance-none bg-white font-bold text-gray-700 focus:ring-4 focus:ring-brand-100 focus:border-brand-500 outline-none transition-all"
+                    required
+                    >
+                    <option value="">選択</option>
+                    {filteredCategories.map(c => (
+                        <option key={c.id} value={c.id}>
+                        {c.name} {c.isFixed ? '(固)' : ''}
+                        </option>
+                    ))}
+                    </select>
+                    <div className="absolute right-3 top-4 pointer-events-none text-gray-400">▼</div>
+                </div>
+              </div>
+              <div>
+                <label className="block text-xs font-bold text-gray-500 mb-2 uppercase tracking-wide ml-1">品目 (任意)</label>
+                <input
+                  type="text"
+                  value={item}
+                  onChange={(e) => setItem(e.target.value)}
+                  placeholder="コンビニ etc"
+                  className="w-full rounded-2xl border-gray-200 border-2 p-3.5 focus:ring-4 focus:ring-brand-100 focus:border-brand-500 outline-none transition-all"
+                />
+              </div>
+            </div>
+
+            {type === 'EXPENSE' && (
+              <div>
+                <label className="block text-xs font-bold text-gray-500 mb-2 uppercase tracking-wide ml-1">支払い方法</label>
+                <div className="relative">
+                  <select
+                    value={paymentMethodId}
+                    onChange={(e) => setPaymentMethodId(e.target.value)}
+                    className="w-full rounded-2xl border-gray-200 border-2 p-3.5 appearance-none bg-white font-bold text-gray-700 focus:ring-4 focus:ring-brand-100 focus:border-brand-500 outline-none transition-all"
+                    required
+                  >
+                    <option value="">選択してください</option>
+                    {paymentMethods.map(pm => (
+                      <option key={pm.id} value={pm.id}>
+                         {pm.name} {pm.type === 'CREDIT' ? '(翌月)' : '(即時)'}
+                      </option>
+                    ))}
+                  </select>
+                  <div className="absolute right-3 top-4 pointer-events-none text-gray-400">▼</div>
+                </div>
+                
+                {paymentMethodId && (
+                   <div className="mt-2.5 animate-fade-in">
+                     {(() => {
+                        const pm = paymentMethods.find(p => p.id === paymentMethodId);
+                        if (!pm) return null;
+                        return pm.type === 'CREDIT' 
+                          ? <div className="text-xs font-bold flex items-center gap-2 text-orange-700 bg-orange-50 px-3 py-2 rounded-xl border border-orange-100"><IconCard size={16} className="pointer-events-none"/> クレジット払い (来月の支払いに計上)</div>
+                          : <div className="text-xs font-bold flex items-center gap-2 text-blue-700 bg-blue-50 px-3 py-2 rounded-xl border border-blue-100"><IconCash size={16} className="pointer-events-none"/> 現金・即時払い (今月の支出に計上)</div>
+                     })()}
+                   </div>
+                )}
+              </div>
+            )}
+
+            {type === 'EXPENSE' && (
+               <div className="flex items-center gap-4 py-1">
+                 <span className="text-xs font-bold text-gray-500 uppercase tracking-wide ml-1 w-16">区分</span>
+                 <button
+                   type="button"
+                   onClick={() => setIsNecessary(!isNecessary)}
+                   className={`flex-1 py-3 px-4 rounded-xl text-sm font-bold transition-all border-2 flex items-center justify-center gap-2 ${
+                     isNecessary 
+                       ? 'bg-emerald-50 border-emerald-200 text-emerald-700' 
+                       : 'bg-white border-gray-200 text-gray-400 hover:bg-gray-50'
+                   }`}
+                 >
+                   {isNecessary ? <><IconCheck size={18} className="pointer-events-none"/> 必要経費</> : '浪費・その他'}
+                 </button>
+               </div>
+            )}
+
+            <div>
+              <label className="block text-xs font-bold text-gray-500 mb-2 uppercase tracking-wide ml-1">メモ</label>
+              <input
+                type="text"
+                value={memo}
+                onChange={(e) => setMemo(e.target.value)}
+                placeholder="詳細など (任意)"
+                className="w-full rounded-2xl border-gray-200 border-2 p-3.5 focus:ring-4 focus:ring-brand-100 focus:border-brand-500 outline-none transition-all"
+              />
+            </div>
+
+            <div className="flex gap-4 pt-6">
+              <button
+                type="button"
+                onClick={onCancel}
+                className="flex-1 px-4 py-4 border-2 border-gray-200 text-gray-500 font-bold rounded-2xl hover:bg-gray-50 transition active:scale-95"
+              >
+                キャンセル
+              </button>
+              <button
+                type="button"
+                onClick={handleSubmit}
+                className="flex-[2] px-4 py-4 bg-brand-600 text-white rounded-2xl hover:bg-brand-700 transition shadow-lg shadow-brand-200 font-bold flex items-center justify-center gap-2 active:scale-95 active:shadow-none"
+              >
+                <IconPlus size={20} strokeWidth={3} className="pointer-events-none" /> 保存する
+              </button>
+            </div>
+          </form>
+        </div>
+      );
+    };
+
+    /* --- components/TransactionList.tsx --- */
+    const TransactionList = ({ transactions, categories, paymentMethods, onDelete }) => {
+      const [deleteTargetId, setDeleteTargetId] = useState(null);
+
+      const sortedTransactions = [...transactions].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+
+      if (sortedTransactions.length === 0) {
+        return (
+            <div className="flex flex-col items-center justify-center h-64 text-gray-400">
+                <p className="font-bold">取引履歴がありません</p>
+            </div>
+        );
+      }
+
+      // Group by Date
+      const grouped = {};
+      sortedTransactions.forEach(t => {
+        if (!grouped[t.date]) grouped[t.date] = [];
+        grouped[t.date].push(t);
+      });
+
+      const dates = Object.keys(grouped).sort((a, b) => new Date(b).getTime() - new Date(a).getTime());
+
+      return (
+        <>
+          <div className="space-y-6">
+            {dates.map(date => (
+              <div key={date}>
+                <h3 className="text-xs font-bold text-gray-400 mb-2 ml-1">{date.replace(/-/g, '/')}</h3>
+                <div className="space-y-3">
+                  {grouped[date].map(t => {
+                      const category = categories.find(c => c.id === t.categoryId);
+                      const method = paymentMethods.find(m => m.id === t.paymentMethodId);
+                      return (
+                          <div 
+                              key={t.id} 
+                              className="bg-white p-4 rounded-2xl shadow-sm border border-gray-100 flex items-center justify-between min-h-[72px]"
+                          >
+                              <div className="flex items-center gap-3 overflow-hidden flex-1">
+                                  {/* Indicator Line */}
+                                  <div className={`w-1.5 h-10 rounded-full shrink-0 ${t.type === 'INCOME' ? 'bg-green-400' : 'bg-red-400'}`} />
+                                  
+                                  <div className="min-w-0 flex-1">
+                                      <div className="flex items-center gap-2 mb-0.5">
+                                          <p className="font-bold text-gray-800 text-sm truncate">{category?.name || '未分類'}</p>
+                                          {t.item && <span className="text-sm text-gray-500 truncate">- {t.item}</span>}
+                                          {t.fixedConfigId && <span className="text-[9px] bg-gray-100 text-gray-500 px-1.5 py-0.5 rounded font-bold">固定</span>}
+                                      </div>
+                                      
+                                      <div className="flex items-center gap-2 text-xs text-gray-400">
+                                          {method && <span className="truncate max-w-[100px]">{method.name}</span>}
+                                          {t.type === 'EXPENSE' && t.isNecessary !== undefined && (
+                                              <span className={`${t.isNecessary ? 'text-emerald-600' : 'text-orange-500'} font-medium`}>
+                                                  {t.isNecessary ? '• 必要' : '• 浪費'}
+                                              </span>
+                                          )}
+                                          {t.memo && <span className="truncate max-w-[120px] text-gray-400">• {t.memo}</span>}
+                                      </div>
+                                  </div>
+                              </div>
+                              
+                              <div className="flex flex-col items-end gap-1 shrink-0 pl-2">
+                                  <p className={`font-black text-base ${t.type === 'INCOME' ? 'text-green-600' : 'text-gray-800'}`}>
+                                      {t.type === 'INCOME' ? '+' : ''}¥{t.amount.toLocaleString()}
+                                  </p>
+                                  
+                                  <button 
+                                      type="button"
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        setDeleteTargetId(t.id);
+                                      }}
+                                      className="p-3 -mr-2 text-gray-300 hover:text-red-500 hover:bg-red-50 rounded-full transition-colors cursor-pointer z-10 active:scale-90"
+                                      aria-label="削除"
+                                  >
+                                      <IconTrash size={20} className="pointer-events-none" />
+                                  </button>
+                              </div>
+                          </div>
+                      );
+                  })}
+                </div>
+              </div>
+            ))}
+          </div>
+
+          <ConfirmModal 
+            isOpen={!!deleteTargetId}
+            message="この取引履歴を完全に削除しますか？"
+            onConfirm={() => {
+              if (deleteTargetId) {
+                onDelete(deleteTargetId);
+                setDeleteTargetId(null);
+              }
+            }}
+            onCancel={() => setDeleteTargetId(null)}
+          />
+        </>
+      );
+    };
+
+    /* --- components/Settings.tsx --- */
+    const Settings = ({ 
+      transactions,
+      paymentMethods, 
+      categories,
+      fixedConfigs,
+      onUpdatePaymentMethods,
+      onUpdateFixedConfigs,
+      onUpdateCategories,
+      onUpdateTransactions 
+    }) => {
+      const [newMethodName, setNewMethodName] = useState('');
+      const [newMethodType, setNewMethodType] = useState('CASH');
+      const [newCatName, setNewCatName] = useState('');
+      const [newCatType, setNewCatType] = useState('EXPENSE');
+      const [fcType, setFcType] = useState('EXPENSE');
+      const [fcAmount, setFcAmount] = useState('');
+      const [fcDay, setFcDay] = useState('25');
+      const [fcCat, setFcCat] = useState('');
+      const [fcMethod, setFcMethod] = useState('');
+      const [fcMemo, setFcMemo] = useState('');
+      const [fcStart, setFcStart] = useState('');
+      const [fcEnd, setFcEnd] = useState('');
+      const [deleteTarget, setDeleteTarget] = useState(null);
+      
+      const fileInputRef = useRef(null);
+
+      const executeDelete = () => {
+        if (!deleteTarget) return;
+
+        if (deleteTarget.type === 'CAT') {
+          onUpdateCategories(categories.filter(c => c.id !== deleteTarget.id));
+        } else if (deleteTarget.type === 'METHOD') {
+          onUpdatePaymentMethods(paymentMethods.filter(p => p.id !== deleteTarget.id));
+        } else if (deleteTarget.type === 'FIXED') {
+          onUpdateFixedConfigs(fixedConfigs.filter(f => f.id !== deleteTarget.id));
+        }
+        setDeleteTarget(null);
+      };
+
+      const getDeleteMessage = () => {
+        switch (deleteTarget?.type) {
+          case 'CAT': return 'この費目を削除しますか？\n過去の取引には残ります。';
+          case 'METHOD': return 'この支払い方法を削除しますか？\n集計に影響が出る可能性があります。';
+          case 'FIXED': return 'この固定設定を削除しますか？\n自動生成済みの履歴は削除されません。';
+          default: return '削除しますか？';
+        }
+      };
+
+      const handleDownloadCSV = () => {
+        const sorted = [...transactions].sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+        // Original Export Format + IDs for robust restoration
+        const header = ['日付', '年', '月', '種別', 'カテゴリ', '費目', '金額', '支払い方法', '区分', 'メモ', '固定費ID', 'カテゴリID', '支払い方法ID', '取引ID'];
+        
+        const escape = (str) => `"${(str || '').toString().replace(/"/g, '""')}"`;
+
+        const rows = sorted.map(t => {
+          const date = new Date(t.date);
+          const cat = categories.find(c => c.id === t.categoryId);
+          const pm = paymentMethods.find(p => p.id === t.paymentMethodId);
+          const type = t.type === 'INCOME' ? '収入' : '支出';
+          const necessary = t.type === 'EXPENSE' ? (t.isNecessary ? '必要' : '浪費') : '-';
+          
+          return [
+            t.date,
+            date.getFullYear(),
+            date.getMonth() + 1,
+            type,
+            escape(cat?.name),
+            escape(t.item),
+            t.amount,
+            escape(pm?.name),
+            necessary,
+            escape(t.memo),
+            t.fixedConfigId || '',
+            t.categoryId || '',
+            t.paymentMethodId || '',
+            t.id
+          ].join(',');
+        });
+
+        const csvContent = '\uFEFF' + [header.join(','), ...rows].join('\n');
+        const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.setAttribute('download', `smart_kakeibo_backup_${new Date().toISOString().slice(0,10)}.csv`);
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+      };
+
+      const parseCSVLine = (line) => {
+          const result = [];
+          let current = '';
+          let inQuotes = false;
+          for (let i = 0; i < line.length; i++) {
+            const char = line[i];
+            if (char === '"') {
+               if (inQuotes && line[i+1] === '"') { // escaped quote
+                 current += '"'; i++;
+               } else {
+                 inQuotes = !inQuotes;
+               }
+            } else if (char === ',' && !inQuotes) {
+              result.push(current); current = '';
+            } else {
+              current += char;
+            }
+          }
+          result.push(current);
+          return result;
+      };
+
+      const handleImportCSV = (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+
+        const reader = new FileReader();
+        reader.onload = (evt) => {
+          try {
+            const text = evt.target.result;
+            const lines = text.split(/\r\n|\n/).filter(line => line.trim() !== '');
+            
+            if (lines.length < 2) {
+              alert('データが見つかりません');
+              return;
+            }
+
+            // Remove header
+            lines.shift();
+
+            const imported = [];
+            const newFixedConfigs = [];
+            const existingFixedIds = new Set(fixedConfigs.map(f => f.id));
+
+            lines.forEach(line => {
+               const cols = parseCSVLine(line);
+               if (cols.length < 10) return; 
+
+               // Map cols:
+               // 0:Date, 1:Year, 2:Month, 3:Type(日本語), 4:CatName, 5:Item, 6:Amount, 7:MethodName, 8:Nec(区分), 9:Memo, 10:FixedID
+               // New: 11:CatID, 12:MethodID, 13:TxID
+               
+               const type = cols[3] === '収入' ? 'INCOME' : 'EXPENSE';
+               const catName = cols[4];
+               const itemName = cols[5];
+               const amount = parseInt(cols[6], 10) || 0;
+               const methodName = cols[7];
+               
+               // Restore Fixed Config ID (trim to avoid deletion issues)
+               const fixedId = cols[10]?.trim() || undefined;
+               
+               // Resolve Category & Method (Prefer ID if available)
+               let catId = '';
+               // Try ID first
+               if (cols[11] && categories.some(c => c.id === cols[11])) {
+                   catId = cols[11];
+               } else {
+                   const foundCat = categories.find(c => c.name === catName && c.type === type);
+                   if (foundCat) catId = foundCat.id;
+               }
+               
+               let methodId = '';
+               if (type === 'EXPENSE') {
+                   // Try ID first
+                   if (cols[12] && paymentMethods.some(p => p.id === cols[12])) {
+                       methodId = cols[12];
+                   } else {
+                       const foundMethod = paymentMethods.find(p => p.name === methodName);
+                       if (foundMethod) methodId = foundMethod.id;
+                   }
+               }
+
+               // Restore Fixed Config if needed
+               if (fixedId && !existingFixedIds.has(fixedId)) {
+                   // Deduplicate in current batch
+                   if (!newFixedConfigs.some(fc => fc.id === fixedId)) {
+                       const dateObj = new Date(cols[0]);
+                       newFixedConfigs.push({
+                           id: fixedId,
+                           type: type,
+                           amount: amount,
+                           categoryId: catId,
+                           paymentMethodId: methodId,
+                           day: dateObj.getDate() || 25,
+                           memo: cols[9] || '自動復元',
+                           startMonth: undefined,
+                           endMonth: undefined
+                       });
+                   }
+               }
+
+               imported.push({
+                 id: cols[13] || `t_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`, 
+                 date: cols[0],
+                 type: type,
+                 amount: amount,
+                 categoryId: catId,
+                 paymentMethodId: methodId,
+                 item: itemName,
+                 memo: cols[9],
+                 isNecessary: cols[8] === '必要',
+                 fixedConfigId: fixedId
+               });
+            });
+
+            if (imported.length === 0) {
+               alert('有効なデータがありませんでした');
+               return;
+            }
+
+            if (window.confirm(`${imported.length}件のデータを読み込みます。\n既存のデータと統合しますか？`)) {
+                
+                // Deduplication Logic (Strictly by ID)
+                const currentTxMap = new Map();
+                transactions.forEach(t => {
+                   currentTxMap.set(t.id, t);
+                });
+
+                let addedCount = 0;
+                let skippedCount = 0;
+
+                imported.forEach(t => {
+                    if (currentTxMap.has(t.id)) {
+                        skippedCount++;
+                    } else {
+                        currentTxMap.set(t.id, t);
+                        addedCount++;
+                    }
+                });
+                
+                onUpdateTransactions(Array.from(currentTxMap.values()));
+                
+                if (newFixedConfigs.length > 0) {
+                    onUpdateFixedConfigs([...fixedConfigs, ...newFixedConfigs]);
+                    alert(`復元完了: ${addedCount}件を追加 (重複${skippedCount}件はスキップ)\n固定費設定${newFixedConfigs.length}件を再登録しました。`);
+                } else {
+                    alert(`復元完了: ${addedCount}件を追加 (重複${skippedCount}件はスキップ)`);
+                }
+            }
+
+          } catch (err) {
+            console.error(err);
+            alert('CSVの読み込みに失敗しました。');
+          }
+          if (fileInputRef.current) fileInputRef.current.value = '';
+        };
+        reader.readAsText(file);
+      };
+
+      const handleAddMethod = (e) => {
+        if (e) e.preventDefault();
+        if (!newMethodName) { alert("名称を入力してください。"); return; }
+        onUpdatePaymentMethods([...paymentMethods, { id: `pm_${Date.now()}`, name: newMethodName, type: newMethodType, isCustom: true }]);
+        setNewMethodName(''); setNewMethodType('CASH'); 
+      };
+
+      const toggleMethodType = (id) => {
+        onUpdatePaymentMethods(paymentMethods.map(pm => pm.id === id ? { ...pm, type: pm.type === 'CASH' ? 'CREDIT' : 'CASH' } : pm));
+      };
+
+      const handleAddCategory = (e) => {
+        if (e) e.preventDefault();
+        if (!newCatName) { alert("費目名を入力してください。"); return; }
+        onUpdateCategories([...categories, { id: `cat_${Date.now()}`, name: newCatName, type: newCatType, isFixed: false }]);
+        setNewCatName('');
+      };
+
+      const handleAddFixedConfig = (e) => {
+        if (e) e.preventDefault();
+        if (!fcAmount || !fcCat) { alert("金額とカテゴリは必須です。"); return; }
+        const amount = parseInt(fcAmount, 10);
+        if (isNaN(amount)) { alert("金額は数値で入力してください。"); return; }
+
+        onUpdateFixedConfigs([...fixedConfigs, {
+          id: `fc_${Date.now()}`,
+          type: fcType,
+          amount: amount,
+          categoryId: fcCat,
+          paymentMethodId: fcMethod,
+          day: parseInt(fcDay, 10),
+          memo: fcMemo || (fcType === 'INCOME' ? '固定収入' : '固定支出'),
+          startMonth: fcStart || undefined,
+          endMonth: fcEnd || undefined
+        }]);
+        setFcAmount(''); setFcMemo(''); setFcStart(''); setFcEnd('');
+      };
+
+      return (
+        <div className="space-y-8 pb-10">
+          {/* CSV Download & Upload */}
+          <section className="bg-white p-6 rounded-3xl shadow-sm border border-gray-100">
+            <h2 className="text-lg font-black text-gray-800 mb-4 flex items-center gap-2">
+              <IconDownload className="text-brand-600 pointer-events-none" /> データ管理
+            </h2>
+            <div className="flex flex-col gap-3">
+              <p className="text-xs text-gray-500 font-medium leading-relaxed bg-gray-50 p-3 rounded-xl">
+                 データをCSVファイルとして保存(バックアップ)、または保存したファイルを読み込んで復元できます。
+                 <br/><span className="text-red-500 font-bold">※アプリを削除する前には必ず出力してください。</span>
+              </p>
+              
+              <div className="grid grid-cols-2 gap-3 mt-2">
+                  <button 
+                    type="button" 
+                    onClick={handleDownloadCSV}
+                    className="bg-gray-900 text-white py-3.5 rounded-xl text-sm font-bold shadow-md cursor-pointer active:scale-95 transition-transform flex items-center justify-center gap-2"
+                  >
+                    <IconDownload size={18} /> CSV出力 (保存)
+                  </button>
+                  
+                  <div className="relative">
+                      <input 
+                        type="file" 
+                        accept=".csv"
+                        ref={fileInputRef}
+                        onChange={handleImportCSV}
+                        className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10"
+                      />
+                      <button 
+                        type="button" 
+                        className="w-full h-full bg-white border-2 border-gray-200 text-gray-600 py-3.5 rounded-xl text-sm font-bold cursor-pointer active:bg-gray-50 transition-colors flex items-center justify-center gap-2"
+                      >
+                        <IconUpload size={18} /> CSV復元 (取込)
+                      </button>
+                  </div>
+              </div>
+            </div>
+          </section>
+
+          {/* Categories */}
+          <section className="bg-white p-6 rounded-3xl shadow-sm border border-gray-100">
+            <h2 className="text-lg font-black text-gray-800 mb-4 flex items-center gap-2">
+              <IconPlus className="text-brand-600 pointer-events-none" /> 費目 (カテゴリ) 設定
+            </h2>
+            <div className="space-y-4 mb-6">
+                <div className="space-y-2">
+                    <h3 className="text-xs font-bold text-gray-400 uppercase ml-2">支出カテゴリ</h3>
+                    <div className="flex flex-wrap gap-2">
+                        {categories.filter(c => c.type === 'EXPENSE').map(c => (
+                            <div key={c.id} className="flex items-center gap-1 bg-white border border-gray-200 pl-3 pr-1 py-1 rounded-full text-sm">
+                                <span className="font-bold text-gray-700">{c.name}</span>
+                                <button type="button" onClick={(e) => { e.stopPropagation(); setDeleteTarget({ type: 'CAT', id: c.id }); }} className="p-2 -m-1 text-gray-300 hover:text-red-500 hover:bg-red-50 rounded-full cursor-pointer transition-colors active:scale-90"><IconTrash size={14} /></button>
+                            </div>
+                        ))}
+                    </div>
+                </div>
+                <div className="space-y-2">
+                    <h3 className="text-xs font-bold text-gray-400 uppercase ml-2">収入カテゴリ</h3>
+                    <div className="flex flex-wrap gap-2">
+                        {categories.filter(c => c.type === 'INCOME').map(c => (
+                            <div key={c.id} className="flex items-center gap-1 bg-white border border-gray-200 pl-3 pr-1 py-1 rounded-full text-sm">
+                                <span className="font-bold text-gray-700">{c.name}</span>
+                                <button type="button" onClick={(e) => { e.stopPropagation(); setDeleteTarget({ type: 'CAT', id: c.id }); }} className="p-2 -m-1 text-gray-300 hover:text-red-500 hover:bg-red-50 rounded-full cursor-pointer transition-colors active:scale-90"><IconTrash size={14} /></button>
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            </div>
+            <form onSubmit={(e) => { e.preventDefault(); handleAddCategory(e); }} className="flex gap-2">
+                <select value={newCatType} onChange={e => setNewCatType(e.target.value)} className="border border-gray-200 rounded-xl p-2 text-xs font-bold bg-white text-gray-700 focus:ring-2 focus:ring-brand-500 outline-none"><option value="EXPENSE">支出</option><option value="INCOME">収入</option></select>
+                <input type="text" value={newCatName} onChange={e => setNewCatName(e.target.value)} placeholder="新しい費目名" className="flex-1 border border-gray-200 rounded-xl p-3 text-sm focus:ring-2 focus:ring-brand-500 outline-none" required/>
+                <button type="button" onClick={handleAddCategory} className="bg-brand-600 text-white px-4 rounded-xl text-sm font-bold shadow-md cursor-pointer active:scale-95 transition-transform">追加</button>
+            </form>
+          </section>
+
+          {/* Payment Methods */}
+          <section className="bg-white p-6 rounded-3xl shadow-sm border border-gray-100">
+            <h2 className="text-lg font-black text-gray-800 mb-4 flex items-center gap-2">
+              <IconCard className="text-brand-600 pointer-events-none" /> 支払い方法設定
+            </h2>
+            <div className="space-y-3 mb-8">
+                {paymentMethods.map(pm => (
+                  <div key={pm.id} className="flex items-center justify-between p-4 rounded-2xl border border-gray-100 bg-white">
+                    <div className="flex items-center gap-3">
+                      <div className={`p-2.5 rounded-full ${pm.type === 'CREDIT' ? 'bg-orange-100 text-orange-600' : 'bg-blue-100 text-blue-600'}`}>
+                          {pm.type === 'CREDIT' ? <IconCard size={18} /> : <IconCash size={18} />}
+                      </div>
+                      <div>
+                          <p className="font-bold text-gray-800 text-sm">{pm.name}</p>
+                          <p className="text-[10px] text-gray-400 font-bold">{pm.type === 'CREDIT' ? '翌月払い' : '即時払い'}</p>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-3">
+                        <button type="button" onClick={() => toggleMethodType(pm.id)} className="text-xs px-3 py-1.5 rounded-lg border bg-gray-50 text-gray-600 font-bold hover:bg-gray-100 cursor-pointer">切替</button>
+                        <button type="button" onClick={(e) => { e.stopPropagation(); setDeleteTarget({ type: 'METHOD', id: pm.id }); }} className="p-3 -mr-2 text-gray-300 hover:text-red-500 hover:bg-red-50 rounded-full cursor-pointer transition-colors relative z-10 active:scale-90"><IconTrash size={18} /></button>
+                    </div>
+                  </div>
+                ))}
+            </div>
+            <form onSubmit={(e) => { e.preventDefault(); handleAddMethod(e); }} className="flex gap-2">
+                <input type="text" value={newMethodName} onChange={e => setNewMethodName(e.target.value)} placeholder="新しい支払い方法" className="flex-1 border border-gray-200 rounded-xl p-3 text-sm focus:ring-2 focus:ring-brand-500 outline-none" required/>
+                 <select value={newMethodType} onChange={e => setNewMethodType(e.target.value)} className="border border-gray-200 rounded-xl p-2 text-xs font-bold bg-white text-gray-700 focus:ring-2 focus:ring-brand-500 outline-none"><option value="CASH">現金 (即時)</option><option value="CREDIT">クレカ (翌月)</option></select>
+                <button type="button" onClick={handleAddMethod} className="bg-gray-900 text-white px-4 rounded-xl text-sm font-bold shadow-md cursor-pointer active:scale-95 transition-transform">追加</button>
+            </form>
+          </section>
+
+          {/* Fixed Configs */}
+          <section className="bg-white p-6 rounded-3xl shadow-sm border border-gray-100">
+            <h2 className="text-lg font-black text-gray-800 mb-4 flex items-center gap-2">
+              <IconCalendar className="text-brand-600 pointer-events-none" /> 固定費・固定収入
+            </h2>
+            <div className="space-y-3 mb-6">
+              {fixedConfigs.map(fc => {
+                const cat = categories.find(c => c.id === fc.categoryId);
+                return (
+                  <div key={fc.id} className="rounded-2xl border border-gray-100 bg-white flex justify-between items-center p-4">
+                    <div className="flex flex-col">
+                      <div className="flex items-center gap-2 mb-1">
+                        <span className="font-bold text-gray-800 text-sm">{fc.memo} ({cat?.name})</span>
+                      </div>
+                      <div className="flex flex-wrap gap-2 text-xs text-gray-500 items-center">
+                         <span className="bg-gray-100 px-2 py-0.5 rounded font-bold">毎月 {fc.day}日</span>
+                         <span className={`px-2 py-0.5 rounded font-bold ${fc.type === 'INCOME' ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>{fc.type === 'INCOME' ? '収入' : '支出'}</span>
+                         <span className="font-bold text-gray-800">¥{fc.amount.toLocaleString()}</span>
+                      </div>
+                    </div>
+                    <button type="button" onClick={(e) => { e.stopPropagation(); setDeleteTarget({ type: 'FIXED', id: fc.id }); }} className="ml-2 p-3 -mr-2 text-gray-300 hover:text-red-500 hover:bg-red-50 rounded-full cursor-pointer transition-colors relative z-10 active:scale-90"><IconTrash size={18} /></button>
+                  </div>
+                );
+              })}
+              {fixedConfigs.length === 0 && <p className="text-center text-sm text-gray-400 py-4">登録なし</p>}
+            </div>
+            <form onSubmit={(e) => { e.preventDefault(); handleAddFixedConfig(e); }} className="bg-gray-50 p-4 rounded-2xl border border-gray-100 space-y-3">
+              <h3 className="text-xs font-bold text-gray-500 uppercase flex items-center gap-1"><IconPlus size={14} /> 新規追加</h3>
+              <div className="grid grid-cols-2 gap-3">
+                <select value={fcType} onChange={e => setFcType(e.target.value)} className="border border-gray-200 rounded-xl p-3 text-sm font-bold text-gray-700 bg-white focus:ring-2 focus:ring-brand-500 outline-none"><option value="INCOME">収入</option><option value="EXPENSE">支出</option></select>
+                <div className="flex items-center border border-gray-200 rounded-xl bg-white px-2 focus-within:ring-2 focus-within:ring-brand-500">
+                  <span className="text-xs text-gray-500 mr-1 font-bold">毎月</span><input type="number" min="1" max="31" value={fcDay} onChange={e => setFcDay(e.target.value)} className="w-full p-2 text-sm outline-none bg-transparent font-bold text-center" required /><span className="text-xs text-gray-500 ml-1 font-bold">日</span>
+                </div>
+                <select value={fcCat} onChange={e => setFcCat(e.target.value)} className="border border-gray-200 rounded-xl p-3 text-sm bg-white font-bold text-gray-700 focus:ring-2 focus:ring-brand-500 outline-none col-span-2" required><option value="">カテゴリ選択</option>{categories.filter(c => c.type === fcType).map(c => (<option key={c.id} value={c.id}>{c.name}</option>))}</select>
+                {fcType === 'EXPENSE' ? (<select value={fcMethod} onChange={e => setFcMethod(e.target.value)} className="border border-gray-200 rounded-xl p-3 text-sm bg-white font-bold text-gray-700 focus:ring-2 focus:ring-brand-500 outline-none col-span-2" required><option value="">支払い方法</option>{paymentMethods.map(m => (<option key={m.id} value={m.id}>{m.name}</option>))}</select>) : null}
+                <input type="number" placeholder="金額" value={fcAmount} onChange={e => setFcAmount(e.target.value)} className="border border-gray-200 rounded-xl p-3 text-sm focus:ring-2 focus:ring-brand-500 outline-none col-span-2 font-bold" required />
+                 <input type="text" placeholder="メモ (例: 家賃)" value={fcMemo} onChange={e => setFcMemo(e.target.value)} className="border border-gray-200 rounded-xl p-3 text-sm focus:ring-2 focus:ring-brand-500 outline-none col-span-2"/>
+                 <div className="col-span-2 bg-white rounded-xl p-3 border border-gray-200"><p className="text-[10px] font-bold text-gray-400 mb-2 uppercase">適用期間 (任意)</p><div className="flex items-center gap-2"><input type="month" value={fcStart} onChange={e => setFcStart(e.target.value)} className="w-full border border-gray-200 rounded-lg p-2 text-xs bg-gray-50 font-bold"/><span className="text-gray-300">➜</span><input type="month" value={fcEnd} onChange={e => setFcEnd(e.target.value)} className="w-full border border-gray-200 rounded-lg p-2 text-xs bg-gray-50 font-bold"/></div></div>
+              </div>
+              <button type="button" onClick={handleAddFixedConfig} className="w-full bg-brand-600 text-white py-3.5 rounded-xl text-sm font-bold hover:bg-brand-700 transition shadow-sm flex items-center justify-center gap-2 cursor-pointer active:scale-95"><IconPlus size={16} /> 保存する</button>
+            </form>
+          </section>
+
+          <ConfirmModal isOpen={!!deleteTarget} message={getDeleteMessage()} onConfirm={executeDelete} onCancel={() => setDeleteTarget(null)} />
+        </div>
+      );
+    };
+
+    /* --- components/Dashboard.tsx --- */
+    const Dashboard = ({ transactions, paymentMethods, categories, onDelete }) => {
+      const today = new Date();
+      const [viewYear, setViewYear] = useState(today.getFullYear());
+      const [targetMonth, setTargetMonth] = useState(`${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}`);
+      
+      const [isFlowOpen, setIsFlowOpen] = useState(true);
+      const [isLedgerOpen, setIsLedgerOpen] = useState(true);
+      const [isCategoryOpen, setIsCategoryOpen] = useState(false);
+
+      const { tableData, summary } = useMemo(() => {
+        const flowMap = {};
+
+        const monthsInYear = [];
+        for (let i = 1; i <= 12; i++) {
+          const m = `${viewYear}-${String(i).padStart(2, '0')}`;
+          monthsInYear.push(m);
+          flowMap[m] = { income: 0, cashSpending: 0, creditSpending: 0, creditPayment: 0 };
+        }
+
+        const currentMonthStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}`;
+        const nm = new Date(today.getFullYear(), today.getMonth() + 1, 1);
+        const nextMonthStr = `${nm.getFullYear()}-${String(nm.getMonth() + 1).padStart(2, '0')}`;
+
+        const addToMap = (m, field, val) => {
+            if (flowMap[m]) {
+                flowMap[m][field] += val;
+            }
+        };
+        
+        let curIncome = 0;
+        let curOutflow = 0; 
+        let nextCreditPay = 0;
+
+        transactions.forEach(t => {
+          const tMonth = t.date.slice(0, 7);
+          
+          if (t.type === 'INCOME') {
+            addToMap(tMonth, 'income', t.amount);
+            if (tMonth === currentMonthStr) curIncome += t.amount;
+          } else {
+            const method = paymentMethods.find(m => m.id === t.paymentMethodId);
+            if (method?.type === 'CREDIT') {
+                const d = new Date(t.date);
+                d.setMonth(d.getMonth() + 1);
+                const payMonth = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+                
+                addToMap(payMonth, 'creditPayment', t.amount); 
+
+                if (payMonth === currentMonthStr) curOutflow += t.amount;
+                if (payMonth === nextMonthStr) nextCreditPay += t.amount;
+            } else {
+                addToMap(tMonth, 'cashSpending', t.amount);
+                if (tMonth === currentMonthStr) curOutflow += t.amount;
+            }
+          }
+        });
+
+        const tableData = monthsInYear.map(m => {
+          const d = flowMap[m];
+          const totalOutflow = d.cashSpending + d.creditPayment;
+          return {
+            month: m,
+            income: d.income,
+            cashSpending: d.cashSpending,
+            creditPayment: d.creditPayment,
+            totalOutflow,
+            balance: d.income - totalOutflow,
+            isCurrent: m === currentMonthStr
+          };
+        });
+
+        return {
+          tableData,
+          summary: {
+            income: curIncome,
+            payment: curOutflow, 
+            balance: curIncome - curOutflow,
+            nextPayment: nextCreditPay 
+          }
+        };
+      }, [transactions, paymentMethods, viewYear]);
+
+      const targetTransactions = useMemo(() => {
+        return transactions.filter(t => t.date.startsWith(targetMonth));
+      }, [transactions, targetMonth]);
+
+      const categoryBreakdown = useMemo(() => {
+        const map = {};
+        let total = 0;
+        targetTransactions.forEach(t => {
+            if (t.type === 'EXPENSE') {
+                const current = map[t.categoryId] || 0;
+                map[t.categoryId] = current + t.amount;
+                total += t.amount;
+            }
+        });
+        return Object.entries(map)
+            .map(([id, amount]) => ({
+                id,
+                name: categories.find(c => c.id === id)?.name || '未分類',
+                amount,
+                percentage: total > 0 ? (amount / total) * 100 : 0
+            }))
+            .sort((a, b) => b.amount - a.amount);
+      }, [targetTransactions, categories]);
+
+      const handleMonthChange = (offset) => {
+        const [y, m] = targetMonth.split('-').map(Number);
+        const newDate = new Date(y, m - 1 + offset, 1);
+        const newMonthStr = `${newDate.getFullYear()}-${String(newDate.getMonth() + 1).padStart(2, '0')}`;
+        setTargetMonth(newMonthStr);
+      };
+
+      return (
+        <div className="flex flex-col gap-6 pb-20">
+          
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 shrink-0">
+            <div className="bg-white p-4 rounded-2xl shadow-sm border border-gray-100 flex flex-col justify-between h-24 relative overflow-hidden">
+              <p className="text-[10px] text-gray-400 font-bold uppercase tracking-wider relative z-10">今月の収入</p>
+              <p className="text-xl font-black text-gray-800 tracking-tighter relative z-10">¥{summary.income.toLocaleString()}</p>
+              <div className="absolute right-[-10px] bottom-[-10px] w-16 h-16 bg-green-50 rounded-full z-0 opacity-50"></div>
+            </div>
+            <div className="bg-white p-4 rounded-2xl shadow-sm border border-gray-100 flex flex-col justify-between h-24 relative overflow-hidden">
+              <p className="text-[10px] text-gray-400 font-bold uppercase tracking-wider relative z-10">今月の支出(確定)</p>
+              <p className="text-xl font-black text-gray-800 tracking-tighter relative z-10">¥{summary.payment.toLocaleString()}</p>
+              <div className="absolute right-[-10px] bottom-[-10px] w-16 h-16 bg-red-50 rounded-full z-0 opacity-50"></div>
+            </div>
+            <div className="bg-white p-4 rounded-2xl shadow-sm border border-gray-100 flex flex-col justify-between h-24 relative overflow-hidden">
+              <p className="text-[10px] text-gray-400 font-bold uppercase tracking-wider relative z-10">収支バランス</p>
+              <p className={`text-xl font-black tracking-tighter relative z-10 ${summary.balance >= 0 ? 'text-brand-600' : 'text-red-500'}`}>
+                {summary.balance > 0 ? '+' : ''}{summary.balance.toLocaleString()}
+              </p>
+              <div className="absolute right-[-10px] bottom-[-10px] w-16 h-16 bg-gray-100 rounded-full z-0 opacity-50"></div>
+            </div>
+            <div className="bg-gradient-to-br from-gray-800 to-gray-900 p-4 rounded-2xl shadow-lg shadow-gray-200 text-white flex flex-col justify-between h-24">
+              <p className="text-[10px] text-gray-400 font-bold uppercase tracking-wider">来月のカード引落</p>
+              <p className="text-xl font-black tracking-tighter text-orange-300">¥{summary.nextPayment.toLocaleString()}</p>
+            </div>
+          </div>
+
+          <div className="bg-white shadow-sm rounded-3xl border border-gray-100 overflow-hidden flex flex-col">
+            <div className="px-5 py-4 bg-white border-b border-gray-50 flex justify-between items-center w-full">
+                <button 
+                    onClick={() => setIsFlowOpen(!isFlowOpen)}
+                    className="font-black text-gray-800 text-sm flex items-center gap-2 focus:outline-none"
+                >
+                  <span className={`bg-brand-100 text-brand-600 p-1.5 rounded-lg transition-transform duration-200 ${isFlowOpen ? 'rotate-90' : ''}`}>
+                      <IconArrowRight size={14}/>
+                  </span>
+                  年間キャッシュフロー
+                </button>
+                <div className="flex items-center bg-gray-50 rounded-xl p-1">
+                  <button onClick={() => setViewYear(y => y - 1)} className="p-1.5 hover:bg-white rounded-lg transition-all shadow-sm"><IconArrowLeft size={14}/></button>
+                  <span className="px-3 text-xs font-bold text-gray-600">{viewYear}年</span>
+                  <button onClick={() => setViewYear(y => y + 1)} className="p-1.5 hover:bg-white rounded-lg transition-all shadow-sm"><IconArrowRight size={14}/></button>
+                </div>
+            </div>
+            
+            {isFlowOpen && (
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm text-left border-collapse whitespace-nowrap">
+                  <thead>
+                    <tr className="text-[10px] text-gray-400 font-bold uppercase border-b border-gray-100">
+                      <th className="px-4 py-3 bg-gray-50/50 sticky left-0 z-10">月</th>
+                      <th className="px-4 py-3 text-right text-green-600 bg-gray-50/50">収入</th>
+                      <th className="px-4 py-3 text-right text-blue-600 bg-blue-50/20">現金出費</th>
+                      <th className="px-4 py-3 text-right text-orange-600 bg-orange-50/20">カード払</th>
+                      <th className="px-4 py-3 text-right text-gray-700 bg-gray-50/80 font-black">支出計</th>
+                      <th className="px-4 py-3 text-right bg-gray-50/50">残高</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-50">
+                    {tableData.map((row) => (
+                      <tr 
+                        key={row.month} 
+                        onClick={() => { setTargetMonth(row.month); setIsLedgerOpen(true); }}
+                        className={`cursor-pointer transition-colors ${targetMonth === row.month ? 'bg-brand-50' : 'hover:bg-gray-50'}`}
+                      >
+                        <td className="px-4 py-3.5 font-bold text-gray-600 sticky left-0 bg-inherit border-r border-gray-50">
+                          {parseInt(row.month.split('-')[1])}月
+                          {row.isCurrent && <span className="ml-1 text-[8px] bg-brand-600 text-white px-1.5 py-0.5 rounded-full">今</span>}
+                        </td>
+                        <td className="px-4 py-3.5 text-right font-medium text-gray-500">{row.income ? `¥${row.income.toLocaleString()}` : '-'}</td>
+                        <td className="px-4 py-3.5 text-right font-medium text-gray-500 bg-blue-50/10">{row.cashSpending ? `¥${row.cashSpending.toLocaleString()}` : '-'}</td>
+                        <td className="px-4 py-3.5 text-right font-medium text-gray-500 bg-orange-50/10">{row.creditPayment ? `¥${row.creditPayment.toLocaleString()}` : '-'}</td>
+                        <td className="px-4 py-3.5 text-right font-bold text-gray-800 bg-gray-50/30">¥{row.totalOutflow.toLocaleString()}</td>
+                        <td className={`px-4 py-3.5 text-right font-bold ${row.balance >= 0 ? 'text-brand-600' : 'text-red-500'}`}>¥{row.balance.toLocaleString()}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+
+          <div className="bg-white shadow-sm rounded-3xl border border-gray-100 flex flex-col">
+            <div className="px-5 py-4 bg-white border-b border-gray-50 flex justify-between items-center w-full rounded-t-3xl sticky top-0 z-20">
+                <button 
+                    onClick={() => setIsLedgerOpen(!isLedgerOpen)}
+                    className="font-black text-gray-800 text-sm flex items-center gap-2 focus:outline-none"
+                >
+                  <span className={`bg-gray-100 text-gray-600 p-1.5 rounded-lg transition-transform duration-200 ${isLedgerOpen ? 'rotate-90' : ''}`}>
+                      <IconArrowRight size={14}/>
+                  </span>
+                  月次帳簿
+                </button>
+
+                <div className="flex items-center bg-gray-50 rounded-xl p-1">
+                  <button onClick={() => handleMonthChange(-1)} className="p-1.5 hover:bg-white rounded-lg transition-all shadow-sm text-gray-600"><IconArrowLeft size={14}/></button>
+                  <span className="px-3 text-xs font-bold text-gray-800 min-w-[80px] text-center">{targetMonth.replace('-', '年 ')}月</span>
+                  <button onClick={() => handleMonthChange(1)} className="p-1.5 hover:bg-white rounded-lg transition-all shadow-sm text-gray-600"><IconArrowRight size={14}/></button>
+                </div>
+            </div>
+            
+            {isLedgerOpen && (
+                <div className="bg-gray-50/30 rounded-b-3xl">
+                    <div className="px-4 py-2 bg-gray-50 border-b border-gray-100">
+                        <button 
+                            onClick={() => setIsCategoryOpen(!isCategoryOpen)}
+                            className="text-xs font-bold text-brand-600 flex items-center gap-1 w-full justify-center py-2"
+                        >
+                            {isCategoryOpen ? '▼ カテゴリ別集計を隠す' : '▶ カテゴリ別集計を表示'}
+                        </button>
+                        {isCategoryOpen && (
+                            <div className="pt-2 pb-4 space-y-2 animate-fade-in">
+                                {categoryBreakdown.length > 0 ? (
+                                    categoryBreakdown.map(cat => (
+                                        <div key={cat.id} className="flex items-center gap-2 text-xs">
+                                            <div className="w-20 font-bold text-gray-600 truncate">{cat.name}</div>
+                                            <div className="flex-1 h-2 bg-gray-100 rounded-full overflow-hidden">
+                                                <div className="h-full bg-brand-500 rounded-full" style={{ width: `${cat.percentage}%` }}></div>
+                                            </div>
+                                            <div className="w-16 text-right font-medium text-gray-700">¥{cat.amount.toLocaleString()}</div>
+                                        </div>
+                                    ))
+                                ) : (
+                                    <p className="text-center text-xs text-gray-400">支出データがありません</p>
+                                )}
+                            </div>
+                        )}
+                    </div>
+
+                    <div className="p-4 min-h-[300px]">
+                        <TransactionList 
+                        transactions={targetTransactions}
+                        categories={categories}
+                        paymentMethods={paymentMethods}
+                        onDelete={onDelete}
+                        />
+                    </div>
+                </div>
+            )}
+          </div>
+        </div>
+      );
+    };
+
+    /* --- App.tsx --- */
+    function App() {
+      const [currentView, setCurrentView] = useState('DASHBOARD');
+      const [transactions, setTransactions] = useState([]);
+      const [paymentMethods, setPaymentMethods] = useState([]);
+      const [categories, setCategories] = useState([]);
+      const [fixedConfigs, setFixedConfigs] = useState([]);
+      
+      useEffect(() => {
+        setTransactions(getTransactions());
+        setCategories(getCategories());
+        setFixedConfigs(getFixedConfigs());
+        const methods = getPaymentMethods();
+        const cleanMethods = methods.filter(m => m.name !== '手入力'); 
+        if (cleanMethods.length !== methods.length) {
+           savePaymentMethods(cleanMethods);
+           setPaymentMethods(cleanMethods);
+        } else {
+           setPaymentMethods(methods);
+        }
+      }, []);
+
+      useEffect(() => { saveTransactions(transactions); }, [transactions]);
+      useEffect(() => { savePaymentMethods(paymentMethods); }, [paymentMethods]);
+      useEffect(() => { saveCategories(categories); }, [categories]);
+      useEffect(() => { saveFixedConfigs(fixedConfigs); }, [fixedConfigs]);
+
+      useEffect(() => {
+        if (fixedConfigs.length === 0) return;
+
+        const generateForMonth = (dateObj) => {
+          const year = dateObj.getFullYear();
+          const month = dateObj.getMonth() + 1; 
+          const monthStr = `${year}-${String(month).padStart(2, '0')}`;
+          const newTransactions = [];
+
+          fixedConfigs.forEach(config => {
+            if (config.startMonth && monthStr < config.startMonth) return;
+            if (config.endMonth && monthStr > config.endMonth) return;
+
+            const exists = transactions.some(t => t.fixedConfigId === config.id && t.date.startsWith(monthStr));
+            if (!exists) {
+              const day = Math.min(config.day, new Date(year, month, 0).getDate());
+              const dateStr = `${monthStr}-${String(day).padStart(2, '0')}`;
+              
+              newTransactions.push({
+                id: `auto_${Date.now()}_${config.id}`,
+                date: dateStr,
+                type: config.type,
+                amount: config.amount,
+                categoryId: config.categoryId,
+                paymentMethodId: config.paymentMethodId || '',
+                memo: config.memo,
+                fixedConfigId: config.id,
+                isNecessary: true
+              });
+            }
+          });
+          return newTransactions;
+        };
+
+        const today = new Date();
+        const nextMonth = new Date(today.getFullYear(), today.getMonth() + 1, 1);
+        const generated = [...generateForMonth(today), ...generateForMonth(nextMonth)];
+
+        if (generated.length > 0) {
+          setTransactions(prev => [...prev, ...generated]);
+        }
+      }, [fixedConfigs, transactions.length]); 
+
+      const handleAddTransaction = (t) => {
+        setTransactions(prev => [t, ...prev]);
+        setCurrentView('DASHBOARD');
+      };
+
+      const handleDeleteTransaction = (id) => {
+        setTransactions(prev => prev.filter(t => t.id !== id));
+      };
+
+      const NavItem = ({ view, label, icon: Icon }) => (
+        <button
+          onClick={() => setCurrentView(view)}
+          className={`flex flex-col items-center justify-center w-full h-full transition-all duration-200 active:scale-95 ${
+            currentView === view ? 'text-brand-600' : 'text-gray-400'
+          }`}
+        >
+          <div className={`p-2 rounded-2xl mb-1 transition-colors ${currentView === view ? 'bg-brand-50' : 'bg-transparent'}`}>
+            <Icon size={24} className={currentView === view ? 'stroke-2' : 'stroke-[1.5]'} />
+          </div>
+          <span className="text-[10px] font-bold tracking-tight">{label}</span>
+        </button>
+      );
+
+      return (
+        <div className="h-full flex flex-col md:flex-row bg-gray-50 text-gray-800">
+          
+          {/* Desktop Sidebar */}
+          <aside className="hidden md:flex flex-col w-72 bg-white border-r border-gray-100 z-20 shadow-lg shadow-gray-100/50">
+            <div className="p-8">
+              <h1 className="text-2xl font-black text-brand-600 tracking-tighter flex items-center gap-2">
+                <span className="w-8 h-8 bg-brand-600 rounded-lg flex items-center justify-center text-white text-lg">¥</span>
+                Smart Kakeibo
+              </h1>
+              <p className="text-xs text-gray-400 font-bold mt-2 ml-1">Personal Finance Manager</p>
+            </div>
+            <nav className="flex-1 px-4 space-y-2">
+               {[
+                 ['DASHBOARD', 'キャッシュフロー', IconChart],
+                 ['ADD', '入力', IconPen],
+                 ['HISTORY', '履歴一覧', IconCalendar],
+                 ['SETTINGS', '設定', IconSettings]
+               ].map(([view, label, Icon]) => (
+                 <button 
+                    key={view}
+                    onClick={() => setCurrentView(view)} 
+                    className={`w-full text-left px-5 py-4 rounded-2xl flex items-center gap-4 transition-all duration-200 ${
+                      currentView === view 
+                        ? 'bg-brand-50 text-brand-700 font-black shadow-sm' 
+                        : 'text-gray-500 hover:bg-gray-50 font-bold hover:text-gray-800'
+                    }`}
+                 >
+                   <Icon size={22} className={currentView === view ? 'stroke-[2.5]' : 'stroke-2'} />
+                   {label}
+                 </button>
+               ))}
+            </nav>
+          </aside>
+
+          {/* Main Content */}
+          <main className="flex-1 flex flex-col relative h-full overflow-hidden">
+            {/* Mobile Header */}
+            <header className="md:hidden bg-white/90 backdrop-blur-md shadow-sm border-b border-gray-100 px-5 py-4 shrink-0 flex justify-between items-center z-20">
+              <h1 className="text-lg font-black text-brand-600 tracking-tight flex items-center gap-2">
+                 <span className="w-6 h-6 bg-brand-600 rounded flex items-center justify-center text-white text-xs">¥</span>
+                 Smart Kakeibo
+              </h1>
+              <button 
+                 onClick={() => setCurrentView('ADD')}
+                 className="bg-gray-900 text-white p-2 rounded-xl shadow-md active:scale-95 transition-transform"
+              >
+                 <IconPlus size={20} />
+              </button>
+            </header>
+
+            <div className="flex-1 overflow-hidden relative">
+              <div className="absolute inset-0 overflow-y-auto no-scrollbar" style={{ WebkitOverflowScrolling: 'touch' }}>
+                <div className="p-4 md:p-8 max-w-4xl mx-auto min-h-full">
+                  
+                  {currentView === 'DASHBOARD' && (
+                    <div className="animate-fade-in-up">
+                      <Dashboard 
+                        transactions={transactions} 
+                        categories={categories} 
+                        paymentMethods={paymentMethods} 
+                        onDelete={handleDeleteTransaction}
+                      />
+                    </div>
+                  )}
+
+                  {currentView === 'ADD' && (
+                    <div className="animate-fade-in-up">
+                      <TransactionForm 
+                        categories={categories}
+                        paymentMethods={paymentMethods}
+                        onSave={handleAddTransaction}
+                        onCancel={() => setCurrentView('DASHBOARD')}
+                      />
+                    </div>
+                  )}
+
+                  {currentView === 'HISTORY' && (
+                    <div className="animate-fade-in-up pb-20">
+                      <h2 className="text-xl font-black text-gray-800 mb-6 flex items-center gap-2">
+                        <IconCalendar className="text-brand-600" /> 全履歴
+                      </h2>
+                      <TransactionList 
+                        transactions={transactions}
+                        categories={categories}
+                        paymentMethods={paymentMethods}
+                        onDelete={handleDeleteTransaction}
+                      />
+                    </div>
+                  )}
+
+                  {currentView === 'SETTINGS' && (
+                    <div className="animate-fade-in-up">
+                      <Settings 
+                        transactions={transactions}
+                        paymentMethods={paymentMethods}
+                        categories={categories}
+                        fixedConfigs={fixedConfigs}
+                        onUpdatePaymentMethods={setPaymentMethods}
+                        onUpdateFixedConfigs={setFixedConfigs}
+                        onUpdateCategories={setCategories}
+                        onUpdateTransactions={setTransactions}
+                      />
+                    </div>
+                  )}
+
+                </div>
+              </div>
+            </div>
+          </main>
+
+          {/* Mobile Bottom Navigation */}
+          <nav className="md:hidden shrink-0 bg-white border-t border-gray-200 flex justify-around items-center z-30 pb-safe shadow-[0_-4px_20px_rgba(0,0,0,0.03)] h-[84px] px-2">
+            <NavItem view="DASHBOARD" label="フロー" icon={IconChart} />
+            <NavItem view="ADD" label="入力" icon={IconPen} />
+            <NavItem view="HISTORY" label="履歴" icon={IconCalendar} />
+            <NavItem view="SETTINGS" label="設定" icon={IconSettings} />
+          </nav>
+
+        </div>
+      );
+    }
+
+    /* --- index.tsx (Mounting) --- */
+    const rootElement = document.getElementById('root');
+    const root = ReactDOM.createRoot(rootElement);
+    root.render(
+      <React.StrictMode>
+        <App />
+      </React.StrictMode>
+    );
+  </script>
+</body>
+</html>

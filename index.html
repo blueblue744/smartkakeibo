@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
-  <title>Smart Kakeibo</title>
+  <title>Smart Kakeibo (IDB)</title>
 
   <!-- PWA Settings -->
   <meta name="apple-mobile-web-app-capable" content="yes">
@@ -75,7 +75,11 @@
   <div id="root" class="h-full w-full"></div>
 
   <!-- Application Logic -->
-  <script type="text/babel">
+  <!-- data-type="module" を指定することで import が使えるようになります -->
+  <script type="text/babel" data-type="module">
+    // idb-keyval をインポート
+    import { get, set } from 'https://unpkg.com/idb-keyval@6.2.1/dist/index.js';
+
     const { useState, useEffect, useMemo, useRef } = React;
 
     /* --- constants.ts --- */
@@ -108,7 +112,7 @@
       { id: 'cat_other', name: 'その他', type: 'EXPENSE', isFixed: false },
     ];
 
-    /* --- services/storageService.ts (Safe Version) --- */
+    /* --- services/storageService.ts (IndexedDB Version) --- */
     const KEYS = {
       TRANSACTIONS: 'sk_transactions_v1',
       PAYMENT_METHODS: 'sk_payment_methods_v1',
@@ -116,36 +120,41 @@
       FIXED_CONFIGS: 'sk_fixed_configs_v1',
     };
 
-    const safeGet = (key, defaultVal) => {
+    // 移行用ヘルパー: LocalStorageにあればIDBに移してLSを消す
+    const migrateFromLS = async (key) => {
+      const lsData = localStorage.getItem(key);
+      if (lsData) {
+        try {
+          const parsed = JSON.parse(lsData);
+          await set(key, parsed); // IndexedDBへ保存
+          localStorage.removeItem(key); // LocalStorageから削除
+          console.log(`[Migration] Moved ${key} to IndexedDB`);
+          return parsed;
+        } catch (e) {
+          console.error('Migration failed', e);
+        }
+      }
+      return null;
+    };
+
+    // データのロード（IDB優先 -> なければLS確認 -> なければ初期値）
+    const loadData = async (key, defaultVal) => {
       try {
-        const data = localStorage.getItem(key);
-        return data ? JSON.parse(data) : defaultVal;
-      } catch (e) {
-        console.warn('Storage access denied or error:', e);
+        let val = await get(key);
+        if (!val) {
+          val = await migrateFromLS(key);
+        }
+        return val || defaultVal;
+      } catch (err) {
+        console.error(`Load failed for ${key}`, err);
         return defaultVal;
       }
     };
 
-    const safeSet = (key, val) => {
-      try {
-        localStorage.setItem(key, JSON.stringify(val));
-      } catch (e) {
-        console.warn('Storage save failed:', e);
-      }
+    // データの保存
+    const saveData = (key, val) => {
+      set(key, val).catch(err => console.error(`Save failed for ${key}`, err));
     };
-
-    const getTransactions = () => safeGet(KEYS.TRANSACTIONS, []);
-    const saveTransactions = (val) => safeSet(KEYS.TRANSACTIONS, val);
-
-    const getPaymentMethods = () => safeGet(KEYS.PAYMENT_METHODS, INITIAL_PAYMENT_METHODS);
-    const savePaymentMethods = (val) => safeSet(KEYS.PAYMENT_METHODS, val);
-
-    const getCategories = () => safeGet(KEYS.CATEGORIES, INITIAL_CATEGORIES);
-    const saveCategories = (val) => safeSet(KEYS.CATEGORIES, val);
-
-    const getFixedConfigs = () => safeGet(KEYS.FIXED_CONFIGS, []);
-    const saveFixedConfigs = (val) => safeSet(KEYS.FIXED_CONFIGS, val);
-
 
     /* --- components/Icons.tsx --- */
     const IconTrash = ({ className = "", size = 20, ...props }) => (
@@ -1400,27 +1409,45 @@
       const [categories, setCategories] = useState([]);
       const [fixedConfigs, setFixedConfigs] = useState([]);
       
+      const [isLoading, setIsLoading] = useState(true);
+
+      // Initialization: Load data and migrate if necessary
       useEffect(() => {
-        setTransactions(getTransactions());
-        setCategories(getCategories());
-        setFixedConfigs(getFixedConfigs());
-        const methods = getPaymentMethods();
-        const cleanMethods = methods.filter(m => m.name !== '手入力'); 
-        if (cleanMethods.length !== methods.length) {
-           savePaymentMethods(cleanMethods);
-           setPaymentMethods(cleanMethods);
-        } else {
-           setPaymentMethods(methods);
-        }
+        const init = async () => {
+          const [txs, cats, pms, fcs] = await Promise.all([
+            loadData(KEYS.TRANSACTIONS, []),
+            loadData(KEYS.CATEGORIES, INITIAL_CATEGORIES),
+            loadData(KEYS.PAYMENT_METHODS, INITIAL_PAYMENT_METHODS),
+            loadData(KEYS.FIXED_CONFIGS, [])
+          ]);
+
+          setTransactions(txs);
+          setCategories(cats);
+          setFixedConfigs(fcs);
+
+          const cleanMethods = pms.filter(m => m.name !== '手入力');
+          if (cleanMethods.length !== pms.length) {
+             saveData(KEYS.PAYMENT_METHODS, cleanMethods);
+             setPaymentMethods(cleanMethods);
+          } else {
+             setPaymentMethods(pms);
+          }
+          
+          setIsLoading(false);
+        };
+
+        init();
       }, []);
 
-      useEffect(() => { saveTransactions(transactions); }, [transactions]);
-      useEffect(() => { savePaymentMethods(paymentMethods); }, [paymentMethods]);
-      useEffect(() => { saveCategories(categories); }, [categories]);
-      useEffect(() => { saveFixedConfigs(fixedConfigs); }, [fixedConfigs]);
+      // Auto-save effects (IndexedDB)
+      useEffect(() => { if(!isLoading) saveData(KEYS.TRANSACTIONS, transactions); }, [transactions, isLoading]);
+      useEffect(() => { if(!isLoading) saveData(KEYS.PAYMENT_METHODS, paymentMethods); }, [paymentMethods, isLoading]);
+      useEffect(() => { if(!isLoading) saveData(KEYS.CATEGORIES, categories); }, [categories, isLoading]);
+      useEffect(() => { if(!isLoading) saveData(KEYS.FIXED_CONFIGS, fixedConfigs); }, [fixedConfigs, isLoading]);
 
+      // Fixed configs automation
       useEffect(() => {
-        if (fixedConfigs.length === 0) return;
+        if (isLoading || fixedConfigs.length === 0) return;
 
         const generateForMonth = (dateObj) => {
           const year = dateObj.getFullYear();
@@ -1460,7 +1487,7 @@
         if (generated.length > 0) {
           setTransactions(prev => [...prev, ...generated]);
         }
-      }, [fixedConfigs, transactions.length]); 
+      }, [fixedConfigs, transactions.length, isLoading]); 
 
       const handleAddTransaction = (t) => {
         setTransactions(prev => [t, ...prev]);
@@ -1484,6 +1511,16 @@
           <span className="text-[10px] font-bold tracking-tight">{label}</span>
         </button>
       );
+
+      // Loading Screen
+      if (isLoading) {
+        return (
+          <div className="h-full w-full flex flex-col items-center justify-center bg-gray-50">
+             <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-brand-600 mb-4"></div>
+             <p className="text-gray-500 font-bold text-sm">読み込み中...</p>
+          </div>
+        );
+      }
 
       return (
         <div className="h-full flex flex-col md:flex-row bg-gray-50 text-gray-800">
@@ -1608,7 +1645,6 @@
       );
     }
 
-    /* --- index.tsx (Mounting) --- */
     const rootElement = document.getElementById('root');
     const root = ReactDOM.createRoot(rootElement);
     root.render(
